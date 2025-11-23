@@ -70,6 +70,8 @@ import argparse
 import os
 import re
 import sys
+import uuid
+from datetime import datetime, timezone
 from openpyxl.styles import Alignment
 from openpyxl.utils import get_column_letter
 
@@ -325,7 +327,7 @@ def ims_to_excel(input_ims, output_excel):
                     points = float(points)
                     if points.is_integer():
                         points = int(points)
-                except (ValueError, AttributeError):
+                except ValueError:
                     points = 0
             
             # For legacy format, include level title in the description for clarity
@@ -376,9 +378,6 @@ def excel_to_ims(input_excel, output_ims, rubric_name_override=None, use_cf_form
         use_cf_format: If True, uses CFRubric format (IMS Global standard). 
                        If False, uses legacy format. Default is True.
     """
-    import uuid
-    from datetime import datetime, timezone
-    
     base = os.path.basename(input_excel)
     raw_rubric_name = os.path.splitext(base)[0].replace("_", " ")
     rubric_name = rubric_name_override or raw_rubric_name
@@ -414,8 +413,10 @@ def excel_to_ims(input_excel, output_ims, rubric_name_override=None, use_cf_form
             level_desc = desc if desc else ""
             
             if use_cf_format:
+                # Ensure score is converted to string, handling None and various types
+                score_str = str(value) if value is not None else "0"
                 level = {
-                    "score": str(value),
+                    "score": score_str,
                     "Identifier": str(uuid.uuid4()),
                     "URI": base_uri,
                     "lastChangeDateTime": current_time,
