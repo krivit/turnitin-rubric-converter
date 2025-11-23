@@ -282,6 +282,9 @@ def ims_to_excel(input_ims, output_excel):
             max_levels = num_levels
     
     # Build the Excel structure with generic level column names
+    # Note: Unlike Turnitin format which uses named scales (e.g., "Excellent", "Good"),
+    # IMS format supports variable numbers of levels per criterion, so we use
+    # generic numbered columns (e.g., "Level 1", "Level 2") to accommodate this flexibility.
     columns = ['Criterion (name and description)']
     for i in range(max_levels):
         columns.append(f"Level {i+1} (desc [value])")
@@ -375,7 +378,8 @@ def excel_to_ims(input_excel, output_ims, rubric_name_override=None):
                 level_title = parts[0].strip()
                 level_desc = parts[1].strip()
             elif desc:
-                level_title = desc.split()[0] if desc.split() else f"Level {level_idx}"
+                desc_words = desc.split()
+                level_title = desc_words[0] if desc_words else f"Level {level_idx}"
                 level_desc = desc
             
             level = {
@@ -398,6 +402,8 @@ def excel_to_ims(input_excel, output_ims, rubric_name_override=None):
         criteria.append(criterion)
     
     # Build IMS format output
+    # Note: Using example.edu as a placeholder domain for rubric IDs.
+    # In production use, this should be replaced with the actual institutional domain.
     output = {
         "@context": "http://purl.imsglobal.org/ctx/caliper/v1p2",
         "type": "Rubric",
