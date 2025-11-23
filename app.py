@@ -3,14 +3,17 @@ import tempfile
 import os
 import json
 
-from rubric_converter import excel_to_rbc, rbc_to_excel
+from rubric_converter import excel_to_rbc, rbc_to_excel, excel_to_ims, is_ims_format
 
-def get_output_filename(input_name):
+def get_output_filename(input_name, output_format=None):
     base, ext = os.path.splitext(input_name)
     if ext.lower() in [".rbc", ".json"]:
         return base + ".xlsx"
     elif ext.lower() == ".xlsx":
-        return base + ".rbc"
+        if output_format == "ims":
+            return base + ".json"
+        else:
+            return base + ".rbc"
     else:
         raise ValueError("Unsupported file type: " + ext)
 
@@ -88,7 +91,7 @@ def convert_json_to_excel(json_path, excel_path):
     rbc_to_excel(json_path, excel_path)
 
 app_ui = ui.page_fluid(
-    ui.h2("Turnitin Rubric/Excel Converter"),
+    ui.h2("Turnitin/IMS Rubric Converter"),
     ui.tags.style("""
     .compact-download-btn {
         font-size: 0.85em;
@@ -113,27 +116,28 @@ app_ui = ui.page_fluid(
     ui.markdown(
         """
 #### Editing an existing rubric
-1. In Turnitin, download the rubric as a `.rbc` file.
-    - The Download option is available in the sandwich menu — the three lines menu — for the rubric. 
-2. Upload the `.rbc` file below for conversion, and download the resulting Excel (`.xlsx`) file.
+1. Download the rubric as a `.rbc` file (Turnitin format) or `.json` file (IMS format).
+    - For Turnitin: The Download option is available in the sandwich menu — the three lines menu — for the rubric. 
+2. Upload the `.rbc` or `.json` file below for conversion, and download the resulting Excel (`.xlsx`) file.
 3. Edit the Excel file.
     - To specify a criterion title and description: put the title on the first line and the description on the second line of the cell in the "Criterion (name and description)" column.
     - Editing the column names in the first row will edit the scale names.
     - For cell descriptions and values: use "desc [value]", "[value]", or just "desc".
-4. Upload the `.xlsx` file below, and download the resulting `.rbc` file.
+4. Upload the `.xlsx` file below, select the output format (Turnitin or IMS), and download the resulting file.
     - You can optionally edit the rubric name before downloading.
-5. Upload the `.rbc` file back into Turnitin.
-    - The Upload option is available in the sandwich menu for the rubric.
+5. Upload the file back to your platform.
+    - For Turnitin: The Upload option is available in the sandwich menu for the rubric.
 """
     ),
     ui.tags.div(
         ui.tags.strong(
-            ui.input_file("file", "Upload .rbc or .xlsx file for conversion here.", accept=[".rbc", ".xlsx", ".json"]),
+            ui.input_file("file", "Upload .rbc, .json, or .xlsx file for conversion here.", accept=[".rbc", ".xlsx", ".json"]),
             style="font-size: 1.13em;"
         ),
         style="margin-bottom: 8px; margin-top: 18px;"
     ),
     ui.output_text_verbatim("status"),
+    ui.output_ui("format_selector_ui"),
     ui.output_ui("rubric_name_ui"),
     ui.output_ui("download_ui"),
 )
@@ -145,6 +149,7 @@ def server(input, output, session):
     uploaded_excel = reactive.Value(None)
     uploaded_excel_name = reactive.Value(None)
     rubric_name_value = reactive.Value("")
+    output_format = reactive.Value("turnitin")
 
     @reactive.Effect
     @reactive.event(input.file)
@@ -162,6 +167,7 @@ def server(input, output, session):
             uploaded_excel.set(None)
             uploaded_excel_name.set(None)
             rubric_name_value.set("")
+            output_format.set("turnitin")
             return
         outname = get_output_filename(in_name)
         outpath = os.path.join(tempfile.gettempdir(), outname)
@@ -176,14 +182,16 @@ def server(input, output, session):
                 uploaded_excel.set(None)
                 uploaded_excel_name.set(None)
                 rubric_name_value.set("")
+                output_format.set("turnitin")
             elif ext == ".xlsx":
                 uploaded_excel.set(in_path)
                 uploaded_excel_name.set(in_name)
                 base = os.path.splitext(in_name)[0].replace("_", " ")
                 rubric_name_value.set(base)
-                status_message.set("Excel file uploaded. You may edit the rubric name below before converting.")
+                status_message.set("Excel file uploaded. Select output format, optionally edit rubric name, then convert.")
                 converted_file.set(None)
                 converted_name.set(None)
+                output_format.set("turnitin")
         except Exception as e:
             status_message.set(f"Conversion failed: {e}")
             converted_file.set(None)
@@ -191,11 +199,24 @@ def server(input, output, session):
             uploaded_excel.set(None)
             uploaded_excel_name.set(None)
             rubric_name_value.set("")
+            output_format.set("turnitin")
 
     @output
     @render.text
     def status():
         return status_message.get()
+
+    @output
+    @render.ui
+    def format_selector_ui():
+        if uploaded_excel.get():
+            return ui.input_radio_buttons(
+                "output_format", 
+                "Output format:", 
+                {"turnitin": "Turnitin (.rbc)", "ims": "IMS (.json)"},
+                selected="turnitin"
+            )
+        return ""
 
     @output
     @render.ui
@@ -223,18 +244,23 @@ def server(input, output, session):
             yield f.read()
 
     @reactive.Effect
-    @reactive.event(input.rubricname, uploaded_excel)
+    @reactive.event(input.rubricname, input.output_format, uploaded_excel)
     def _():
         if uploaded_excel.get() and rubric_name_value.get():
             in_path = uploaded_excel.get()
             in_name = uploaded_excel_name.get()
             rubric_name = rubric_name_value.get()
-            outname = get_output_filename(in_name)
+            fmt = input.output_format() if input.output_format() else "turnitin"
+            output_format.set(fmt)
+            outname = get_output_filename(in_name, fmt)
             outpath = os.path.join(tempfile.gettempdir(), outname)
             if os.path.exists(outpath):
                 os.remove(outpath)
             try:
-                excel_to_rbc(in_path, outpath, rubric_name_override=rubric_name)
+                if fmt == "ims":
+                    excel_to_ims(in_path, outpath, rubric_name_override=rubric_name)
+                else:
+                    excel_to_rbc(in_path, outpath, rubric_name_override=rubric_name)
                 status_message.set(f"Conversion successful. Output: {outname}")
                 converted_file.set(outpath)
                 converted_name.set(outname)

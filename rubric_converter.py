@@ -10,6 +10,7 @@
 #
 # USAGE INSTRUCTIONS:
 #
+# For Turnitin rubrics (.rbc files):
 # 1. In Turnitin, create and save a new rubric (or select an existing one)
 #    and ensure its Scoring type is set to "Custom".
 #
@@ -20,7 +21,13 @@
 #      python rubric_converter.py yourrubric.rbc
 #    This will produce yourrubric.xlsx.
 #
-# 4. Edit the Excel file as needed using Microsoft Excel or compatible
+# For IMS specification rubrics (.json files):
+# 1. To convert an IMS .json file to Excel for editing:
+#      python rubric_converter.py yourrubric.json
+#    This will produce yourrubric.xlsx.
+#
+# Editing the Excel file:
+# 1. Edit the Excel file as needed using Microsoft Excel or compatible
 #    spreadsheet editor.
 #
 #    - To specify a criterion title and description: put the criterion title on
@@ -35,15 +42,22 @@
 #         [2]
 #      If both are omitted, the cell value is treated as 0.
 #
-# 5. To convert the edited Excel file back to .rbc:
+# Converting back from Excel:
+# 1. To convert the edited Excel file back to Turnitin format (.rbc):
 #      python rubric_converter.py yourrubric.xlsx
-#    This will produce yourrubric.rbc.
+#    This will produce yourrubric.rbc (default).
+#
+# 2. To convert the edited Excel file to IMS format (.json):
+#      python rubric_converter.py yourrubric.xlsx -f ims
+#    This will produce yourrubric.json.
+#
 #    You can override the output filename with -o OUTPUT.
-#    You can set a new rubric name (when converting Excel to RBC) with
+#    You can set a new rubric name (when converting Excel to any format) with
 #    -r "My Rubric Name".
 #
-# 6. Upload the .rbc file back into Turnitin. (The Upload option is
+# 3. Upload the .rbc file back into Turnitin (The Upload option is
 #    available in the sandwich menu — the three lines menu — for the rubric.)
+#    or use the .json file with IMS-compatible systems.
 #
 # See help with:
 #   python rubric_converter.py -h
@@ -243,7 +257,11 @@ def is_ims_format(data):
     return False
 
 def ims_to_excel(input_ims, output_excel):
-    """Convert IMS format JSON to Excel."""
+    """Convert IMS format JSON to Excel.
+    
+    IMS format allows different numbers of levels for different criteria,
+    so we need to create a flexible Excel structure.
+    """
     from openpyxl.utils import get_column_letter
     
     with open(input_ims, 'r') as f:
@@ -256,18 +274,17 @@ def ims_to_excel(input_ims, output_excel):
     if not criteria_data:
         raise ValueError("No criteria found in IMS format file")
     
-    # Collect all unique level titles (scales) across all criteria
-    level_titles = []
+    # Find the maximum number of levels across all criteria
+    max_levels = 0
     for criterion in criteria_data:
-        for level in criterion.get('levels', []):
-            title = level.get('title', '')
-            if title and title not in level_titles:
-                level_titles.append(title)
+        num_levels = len(criterion.get('levels', []))
+        if num_levels > max_levels:
+            max_levels = num_levels
     
-    # Build the Excel structure
+    # Build the Excel structure with generic level column names
     columns = ['Criterion (name and description)']
-    for title in level_titles:
-        columns.append(f"{title} (desc [value])")
+    for i in range(max_levels):
+        columns.append(f"Level {i+1} (desc [value])")
     
     rows = []
     for criterion in criteria_data:
@@ -275,28 +292,31 @@ def ims_to_excel(input_ims, output_excel):
         crit_desc = criterion.get('description', '')
         row = [criterion_cell(crit_name, crit_desc)]
         
-        # Create a mapping of level titles to level data for this criterion
-        level_map = {}
-        for level in criterion.get('levels', []):
+        # Add each level for this criterion
+        levels = criterion.get('levels', [])
+        for level in levels:
+            desc = level.get('description', '')
+            points = level.get('points', 0)
+            # Include level title in the description for clarity
             level_title = level.get('title', '')
-            level_map[level_title] = level
-        
-        # Fill in values for each scale
-        for title in level_titles:
-            if title in level_map:
-                level = level_map[title]
-                desc = level.get('description', '')
-                points = level.get('points', 0)
-                row.append(format_desc_value(desc, points))
+            if level_title and desc:
+                full_desc = f"{level_title}: {desc}"
+            elif level_title:
+                full_desc = level_title
             else:
-                row.append('')
+                full_desc = desc
+            row.append(format_desc_value(full_desc, points))
+        
+        # Fill remaining columns with empty strings if this criterion has fewer levels
+        while len(row) < len(columns):
+            row.append('')
         
         rows.append(row)
     
     print(f"Converting IMS format to Excel.")
     print(f"Rubric name: {rubric_name}")
     print(f"Number of criteria: {len(criteria_data)}")
-    print(f"Number of levels: {len(level_titles)}")
+    print(f"Maximum levels per criterion: {max_levels}")
     print(f"Writing to: {output_excel}")
     
     df = pd.DataFrame(rows, columns=columns)
@@ -313,35 +333,61 @@ def ims_to_excel(input_ims, output_excel):
                 cell.alignment = Alignment(wrap_text=True)
 
 def excel_to_ims(input_excel, output_ims, rubric_name_override=None):
-    """Convert Excel to IMS format JSON."""
+    """Convert Excel to IMS format JSON.
+    
+    IMS format allows different numbers of levels for different criteria.
+    Only non-empty cells will be converted to levels.
+    """
     base = os.path.basename(input_excel)
     raw_rubric_name = os.path.splitext(base)[0].replace("_", " ")
     rubric_name = rubric_name_override or raw_rubric_name
     
     df = pd.read_excel(input_excel)
     
-    # Extract scale names from column headers
-    scale_names = [col[:-15] for col in df.columns if col.endswith('(desc [value])')]
+    # Extract level column names from column headers
+    level_columns = [col for col in df.columns if col.endswith('(desc [value])')]
     
     # Build criteria array
     criteria = []
+    total_levels = 0
     for idx, row in df.iterrows():
         crit_cell = row['Criterion (name and description)']
         crit_name, crit_desc = parse_criterion_cell(crit_cell)
         
-        # Build levels for this criterion
+        # Build levels for this criterion - only include non-empty cells
         levels = []
-        for scale_name in scale_names:
-            cell = row.get(f"{scale_name} (desc [value])", None)
+        level_idx = 1
+        for col_idx, col_name in enumerate(level_columns):
+            cell = row.get(col_name, None)
+            # Skip empty cells
+            if pd.isna(cell) or (isinstance(cell, str) and cell.strip() == ""):
+                continue
+                
             desc, value = parse_desc_value(cell)
             
+            # Extract level title from description if it contains a colon
+            # (this handles the format "Title: Description" that we use in ims_to_excel)
+            level_title = f"Level {level_idx}"
+            level_desc = desc if desc else ""
+            
+            if desc and ":" in desc:
+                parts = desc.split(":", 1)
+                level_title = parts[0].strip()
+                level_desc = parts[1].strip()
+            elif desc:
+                level_title = desc.split()[0] if desc.split() else f"Level {level_idx}"
+                level_desc = desc
+            
             level = {
-                "id": f"level-{idx+1}-{scale_name.lower().replace(' ', '-')}",
-                "title": scale_name,
-                "description": desc if desc else "",
+                "id": f"criterion-{idx+1}-level-{level_idx}",
+                "title": level_title,
+                "description": level_desc,
                 "points": value
             }
             levels.append(level)
+            level_idx += 1
+        
+        total_levels += len(levels)
         
         criterion = {
             "id": f"criterion-{idx+1}",
@@ -364,7 +410,7 @@ def excel_to_ims(input_excel, output_ims, rubric_name_override=None):
     print(f"Converting Excel to IMS format.")
     print(f"Rubric name: {rubric_name}")
     print(f"Number of criteria: {len(criteria)}")
-    print(f"Number of levels per criterion: {len(scale_names)}")
+    print(f"Total levels across all criteria: {total_levels}")
     print(f"Writing to: {output_ims}")
     
     with open(output_ims, 'w') as f:
