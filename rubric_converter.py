@@ -231,12 +231,156 @@ def criterion_cell(name, desc):
     else:
         return name
 
+def is_ims_format(data):
+    """Check if the JSON data is in IMS format."""
+    if isinstance(data, dict):
+        # IMS format has specific keys like 'criteria' or 'type': 'Rubric'
+        has_criteria = 'criteria' in data
+        has_type = data.get('type') == 'Rubric' or data.get('@type') == 'Rubric'
+        # IMS format doesn't have Turnitin-specific keys
+        has_turnitin_keys = 'Rubric' in data or 'RubricCriterion' in data
+        return (has_criteria or has_type) and not has_turnitin_keys
+    return False
+
+def ims_to_excel(input_ims, output_excel):
+    """Convert IMS format JSON to Excel."""
+    from openpyxl.utils import get_column_letter
+    
+    with open(input_ims, 'r') as f:
+        data = json.load(f)
+    
+    # Extract rubric information
+    rubric_name = data.get('title', 'N/A')
+    criteria_data = data.get('criteria', [])
+    
+    if not criteria_data:
+        raise ValueError("No criteria found in IMS format file")
+    
+    # Collect all unique level titles (scales) across all criteria
+    level_titles = []
+    for criterion in criteria_data:
+        for level in criterion.get('levels', []):
+            title = level.get('title', '')
+            if title and title not in level_titles:
+                level_titles.append(title)
+    
+    # Build the Excel structure
+    columns = ['Criterion (name and description)']
+    for title in level_titles:
+        columns.append(f"{title} (desc [value])")
+    
+    rows = []
+    for criterion in criteria_data:
+        crit_name = criterion.get('title', '')
+        crit_desc = criterion.get('description', '')
+        row = [criterion_cell(crit_name, crit_desc)]
+        
+        # Create a mapping of level titles to level data for this criterion
+        level_map = {}
+        for level in criterion.get('levels', []):
+            level_title = level.get('title', '')
+            level_map[level_title] = level
+        
+        # Fill in values for each scale
+        for title in level_titles:
+            if title in level_map:
+                level = level_map[title]
+                desc = level.get('description', '')
+                points = level.get('points', 0)
+                row.append(format_desc_value(desc, points))
+            else:
+                row.append('')
+        
+        rows.append(row)
+    
+    print(f"Converting IMS format to Excel.")
+    print(f"Rubric name: {rubric_name}")
+    print(f"Number of criteria: {len(criteria_data)}")
+    print(f"Number of levels: {len(level_titles)}")
+    print(f"Writing to: {output_excel}")
+    
+    df = pd.DataFrame(rows, columns=columns)
+    
+    with pd.ExcelWriter(output_excel, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False)
+        worksheet = list(writer.sheets.values())[0]
+        # Set column widths: first column 5 cm, others 3 cm (1 cm ~ 2.835 units)
+        worksheet.column_dimensions[get_column_letter(1)].width = 5 * 2.835  # 5 cm
+        for col in range(2, len(columns) + 1):
+            worksheet.column_dimensions[get_column_letter(col)].width = 3 * 2.835  # 3 cm
+        for row in worksheet.iter_rows():
+            for cell in row:
+                cell.alignment = Alignment(wrap_text=True)
+
+def excel_to_ims(input_excel, output_ims, rubric_name_override=None):
+    """Convert Excel to IMS format JSON."""
+    base = os.path.basename(input_excel)
+    raw_rubric_name = os.path.splitext(base)[0].replace("_", " ")
+    rubric_name = rubric_name_override or raw_rubric_name
+    
+    df = pd.read_excel(input_excel)
+    
+    # Extract scale names from column headers
+    scale_names = [col[:-15] for col in df.columns if col.endswith('(desc [value])')]
+    
+    # Build criteria array
+    criteria = []
+    for idx, row in df.iterrows():
+        crit_cell = row['Criterion (name and description)']
+        crit_name, crit_desc = parse_criterion_cell(crit_cell)
+        
+        # Build levels for this criterion
+        levels = []
+        for scale_name in scale_names:
+            cell = row.get(f"{scale_name} (desc [value])", None)
+            desc, value = parse_desc_value(cell)
+            
+            level = {
+                "id": f"level-{idx+1}-{scale_name.lower().replace(' ', '-')}",
+                "title": scale_name,
+                "description": desc if desc else "",
+                "points": value
+            }
+            levels.append(level)
+        
+        criterion = {
+            "id": f"criterion-{idx+1}",
+            "title": crit_name,
+            "description": crit_desc if crit_desc else "",
+            "levels": levels
+        }
+        criteria.append(criterion)
+    
+    # Build IMS format output
+    output = {
+        "@context": "http://purl.imsglobal.org/ctx/caliper/v1p2",
+        "type": "Rubric",
+        "id": f"https://example.edu/rubrics/{rubric_name.lower().replace(' ', '-')}",
+        "title": rubric_name,
+        "description": "",
+        "criteria": criteria
+    }
+    
+    print(f"Converting Excel to IMS format.")
+    print(f"Rubric name: {rubric_name}")
+    print(f"Number of criteria: {len(criteria)}")
+    print(f"Number of levels per criterion: {len(scale_names)}")
+    print(f"Writing to: {output_ims}")
+    
+    with open(output_ims, 'w') as f:
+        json.dump(output, f, indent=2)
+
 def rbc_to_excel(input_rbc, output_excel):
     from openpyxl.utils import get_column_letter
     from openpyxl import load_workbook
 
     with open(input_rbc, 'r') as f:
         data = json.load(f)
+    
+    # Check if this is IMS format
+    if is_ims_format(data):
+        # Close the file and call ims_to_excel
+        return ims_to_excel(input_rbc, output_excel)
 
     criteria = {c['id']: c for c in data['RubricCriterion']}
     scales = {s['id']: s for s in data['RubricScale']}
@@ -332,17 +476,30 @@ def main():
     )
     parser.add_argument("input_file", help="Path to the input file (.xlsx, .rbc, or .json)")
     parser.add_argument("-o", "--output_file", help="Optional output file name")
-    parser.add_argument("-r", "--rubric-name", help="Rubric name (overrides name from file name, Excel→RBC only)")
+    parser.add_argument("-r", "--rubric-name", help="Rubric name (overrides name from file name, Excel→JSON only)")
+    parser.add_argument("-f", "--format", choices=["turnitin", "ims"], 
+                       help="Output format when converting from Excel (default: turnitin)")
     args = parser.parse_args()
 
     input_ext = os.path.splitext(args.input_file)[1].lower()
     if input_ext == ".xlsx":
+        # Determine output format
+        output_format = args.format or "turnitin"
+        
         if args.output_file:
-            output_rbc = args.output_file
+            output_file = args.output_file
         else:
             base, _ = os.path.splitext(args.input_file)
-            output_rbc = base + ".rbc"
-        excel_to_rbc(args.input_file, output_rbc, rubric_name_override=args.rubric_name)
+            if output_format == "ims":
+                output_file = base + ".json"
+            else:
+                output_file = base + ".rbc"
+        
+        # Convert based on format
+        if output_format == "ims":
+            excel_to_ims(args.input_file, output_file, rubric_name_override=args.rubric_name)
+        else:
+            excel_to_rbc(args.input_file, output_file, rubric_name_override=args.rubric_name)
     elif input_ext in (".rbc", ".json"):
         if args.output_file:
             output_excel = args.output_file
