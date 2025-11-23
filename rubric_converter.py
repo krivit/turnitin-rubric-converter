@@ -248,17 +248,20 @@ def criterion_cell(name, desc):
 def is_ims_format(data):
     """Check if the JSON data is in IMS format."""
     if isinstance(data, dict):
-        # IMS format has specific keys like 'criteria' or 'type': 'Rubric'
+        # IMS format has 'CFRubricCriterion' key (IMS Global standard)
+        has_cf_rubric_criterion = 'CFRubricCriterion' in data
+        # Legacy check for older format: 'criteria' or 'type': 'Rubric'
         has_criteria = 'criteria' in data
         has_type = data.get('type') == 'Rubric' or data.get('@type') == 'Rubric'
         # IMS format doesn't have Turnitin-specific keys
         has_turnitin_keys = 'Rubric' in data or 'RubricCriterion' in data
-        return (has_criteria or has_type) and not has_turnitin_keys
+        return (has_cf_rubric_criterion or has_criteria or has_type) and not has_turnitin_keys
     return False
 
 def ims_to_excel(input_ims, output_excel):
     """Convert IMS format JSON to Excel.
     
+    Supports both IMS Global CFRubric format and legacy formats.
     IMS format allows different numbers of levels for different criteria,
     so we need to create a flexible Excel structure.
     """
@@ -267,9 +270,14 @@ def ims_to_excel(input_ims, output_excel):
     with open(input_ims, 'r') as f:
         data = json.load(f)
     
-    # Extract rubric information
-    rubric_name = data.get('title', 'N/A')
-    criteria_data = data.get('criteria', [])
+    # Extract rubric information - support both CFRubric and legacy formats
+    rubric_name = data.get('Title') or data.get('title', 'N/A')
+    
+    # Check for CFRubricCriterion (IMS Global standard) or legacy 'criteria'
+    if 'CFRubricCriterion' in data:
+        criteria_data = data['CFRubricCriterion']
+    else:
+        criteria_data = data.get('criteria', [])
     
     if not criteria_data:
         raise ValueError("No criteria found in IMS format file")
@@ -277,7 +285,11 @@ def ims_to_excel(input_ims, output_excel):
     # Find the maximum number of levels across all criteria
     max_levels = 0
     for criterion in criteria_data:
-        num_levels = len(criterion.get('levels', []))
+        # Support both CFRubricCriterionLevels and legacy 'levels'
+        if 'CFRubricCriterionLevels' in criterion:
+            num_levels = len(criterion['CFRubricCriterionLevels'])
+        else:
+            num_levels = len(criterion.get('levels', []))
         if num_levels > max_levels:
             max_levels = num_levels
     
@@ -291,16 +303,32 @@ def ims_to_excel(input_ims, output_excel):
     
     rows = []
     for criterion in criteria_data:
-        crit_name = criterion.get('title', '')
-        crit_desc = criterion.get('description', '')
+        # Support both CFRubric and legacy formats for criterion description
+        crit_name = criterion.get('Description') or criterion.get('title', '')
+        crit_desc = criterion.get('description', '')  # CFRubric format typically doesn't have separate description
         row = [criterion_cell(crit_name, crit_desc)]
         
+        # Get levels - support both CFRubricCriterionLevels and legacy 'levels'
+        if 'CFRubricCriterionLevels' in criterion:
+            levels = criterion['CFRubricCriterionLevels']
+        else:
+            levels = criterion.get('levels', [])
+        
         # Add each level for this criterion
-        levels = criterion.get('levels', [])
         for level in levels:
-            desc = level.get('description', '')
-            points = level.get('points', 0)
-            # Include level title in the description for clarity
+            # Support both CFRubric format (Description, score) and legacy format (title, description, points)
+            desc = level.get('Description') or level.get('description', '')
+            points = level.get('score') or level.get('points', 0)
+            # Convert score to numeric if it's a string
+            if isinstance(points, str):
+                try:
+                    points = float(points)
+                    if points.is_integer():
+                        points = int(points)
+                except (ValueError, AttributeError):
+                    points = 0
+            
+            # For legacy format, include level title in the description for clarity
             level_title = level.get('title', '')
             if level_title and desc:
                 full_desc = f"{level_title}: {desc}"
@@ -335,12 +363,22 @@ def ims_to_excel(input_ims, output_excel):
             for cell in row:
                 cell.alignment = Alignment(wrap_text=True)
 
-def excel_to_ims(input_excel, output_ims, rubric_name_override=None):
+def excel_to_ims(input_excel, output_ims, rubric_name_override=None, use_cf_format=True):
     """Convert Excel to IMS format JSON.
     
     IMS format allows different numbers of levels for different criteria.
     Only non-empty cells will be converted to levels.
+    
+    Args:
+        input_excel: Path to input Excel file
+        output_ims: Path to output JSON file
+        rubric_name_override: Optional rubric name override
+        use_cf_format: If True, uses CFRubric format (IMS Global standard). 
+                       If False, uses legacy format. Default is True.
     """
+    import uuid
+    from datetime import datetime, timezone
+    
     base = os.path.basename(input_excel)
     raw_rubric_name = os.path.splitext(base)[0].replace("_", " ")
     rubric_name = rubric_name_override or raw_rubric_name
@@ -349,6 +387,10 @@ def excel_to_ims(input_excel, output_ims, rubric_name_override=None):
     
     # Extract level column names from column headers
     level_columns = [col for col in df.columns if col.endswith('(desc [value])')]
+    
+    # Placeholder URI - in production this should be configurable
+    base_uri = "https://example.edu/rubric"
+    current_time = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
     
     # Build criteria array
     criteria = []
@@ -359,7 +401,7 @@ def excel_to_ims(input_excel, output_ims, rubric_name_override=None):
         
         # Build levels for this criterion - only include non-empty cells
         levels = []
-        level_idx = 1
+        level_position = 0
         for col_idx, col_name in enumerate(level_columns):
             cell = row.get(col_name, None)
             # Skip empty cells
@@ -368,52 +410,85 @@ def excel_to_ims(input_excel, output_ims, rubric_name_override=None):
                 
             desc, value = parse_desc_value(cell)
             
-            # Extract level title from description if it contains a colon
-            # (this handles the format "Title: Description" that we use in ims_to_excel)
-            level_title = f"Level {level_idx}"
+            # For CFRubric format, we only use the description (not separate title)
             level_desc = desc if desc else ""
             
-            if desc and ":" in desc:
-                parts = desc.split(":", 1)
-                level_title = parts[0].strip()
-                level_desc = parts[1].strip()
-            elif desc:
-                desc_words = desc.split()
-                level_title = desc_words[0] if desc_words else f"Level {level_idx}"
-                level_desc = desc
+            if use_cf_format:
+                level = {
+                    "score": str(value),
+                    "Identifier": str(uuid.uuid4()),
+                    "URI": base_uri,
+                    "lastChangeDateTime": current_time,
+                    "position": level_position,
+                    "Description": level_desc
+                }
+            else:
+                # Legacy format with separate title extraction
+                level_title = f"Level {level_position + 1}"
+                if desc and ":" in desc:
+                    parts = desc.split(":", 1)
+                    level_title = parts[0].strip()
+                    level_desc = parts[1].strip()
+                elif desc:
+                    desc_words = desc.split()
+                    level_title = desc_words[0] if desc_words else f"Level {level_position + 1}"
+                
+                level = {
+                    "id": f"criterion-{idx+1}-level-{level_position+1}",
+                    "title": level_title,
+                    "description": level_desc,
+                    "points": value
+                }
             
-            level = {
-                "id": f"criterion-{idx+1}-level-{level_idx}",
-                "title": level_title,
-                "description": level_desc,
-                "points": value
-            }
             levels.append(level)
-            level_idx += 1
+            level_position += 1
         
         total_levels += len(levels)
         
-        criterion = {
-            "id": f"criterion-{idx+1}",
-            "title": crit_name,
-            "description": crit_desc if crit_desc else "",
-            "levels": levels
-        }
+        if use_cf_format:
+            criterion = {
+                "Identifier": str(uuid.uuid4()),
+                "URI": base_uri,
+                "lastChangeDateTime": current_time,
+                "position": idx + 1,
+                "Description": crit_name,
+                "CFRubricCriterionLevels": levels
+            }
+        else:
+            criterion = {
+                "id": f"criterion-{idx+1}",
+                "title": crit_name,
+                "description": crit_desc if crit_desc else "",
+                "levels": levels
+            }
+        
         criteria.append(criterion)
     
     # Build IMS format output
-    # Note: Using example.edu as a placeholder domain for rubric IDs.
-    # In production use, this should be replaced with the actual institutional domain.
-    output = {
-        "@context": "http://purl.imsglobal.org/ctx/caliper/v1p2",
-        "type": "Rubric",
-        "id": f"https://example.edu/rubrics/{rubric_name.lower().replace(' ', '-')}",
-        "title": rubric_name,
-        "description": "",
-        "criteria": criteria
-    }
+    if use_cf_format:
+        # IMS Global CFRubric format
+        output = {
+            "description": "",
+            "Identifier": str(uuid.uuid4()),
+            "URI": base_uri,
+            "Title": rubric_name,
+            "lastChangeDateTime": current_time,
+            "CFRubricCriterion": criteria
+        }
+    else:
+        # Legacy format
+        # Note: Using example.edu as a placeholder domain for rubric IDs.
+        # In production use, this should be replaced with the actual institutional domain.
+        output = {
+            "@context": "http://purl.imsglobal.org/ctx/caliper/v1p2",
+            "type": "Rubric",
+            "id": f"https://example.edu/rubrics/{rubric_name.lower().replace(' ', '-')}",
+            "title": rubric_name,
+            "description": "",
+            "criteria": criteria
+        }
     
-    print(f"Converting Excel to IMS format.")
+    print(f"Converting Excel to IMS format ({'CFRubric' if use_cf_format else 'legacy'}).")
     print(f"Rubric name: {rubric_name}")
     print(f"Number of criteria: {len(criteria)}")
     print(f"Total levels across all criteria: {total_levels}")
