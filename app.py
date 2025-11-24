@@ -121,8 +121,9 @@ app_ui = ui.page_fluid(
 2. Upload the `.rbc` or `.json` file below for conversion, and download the resulting Excel (`.xlsx`) file.
 3. Edit the Excel file.
     - To specify a criterion title and description: put the title on the first line and the description on the second line of the cell in the "Criterion (name and description)" column.
-    - Editing the column names in the first row will edit the scale names.
+    - Editing the column names in the first row will edit the scale names. (Note that IMS ignores them.)
     - For cell descriptions and values: use "desc [value]", "[value]", or just "desc".
+    - Note that Turnitin requires all criteria to have the same number of cells, though their point values may differ.
 4. Upload the `.xlsx` file below, select the output format (Turnitin or IMS), and download the resulting file.
     - You can optionally edit the rubric name before downloading.
 5. Upload the file back to your platform.
